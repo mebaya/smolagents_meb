@@ -181,6 +181,13 @@ def extract_code_from_text(text: str, code_block_tags: tuple[str, str]) -> str |
         return "\n\n".join(match.strip() for match in matches)
     return None
 
+def parse_prompt_user(text: str, prompt_user_tags: tuple[str, str]) -> str:
+    """Extract user prompt from the LLM's output."""
+    pattern = rf"{prompt_user_tags[0]}(.*?){prompt_user_tags[1]}"
+    matches = re.findall(pattern, text, re.DOTALL)
+    if matches:
+        return "\n\n".join(match.strip() for match in matches)
+    return None
 
 def parse_code_blobs(text: str, code_block_tags: tuple[str, str]) -> str:
     """Extract code blocs from the LLM's output.

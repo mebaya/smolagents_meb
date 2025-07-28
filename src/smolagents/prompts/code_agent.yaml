@@ -9,8 +9,23 @@ system_prompt: |-
   These print outputs will then appear in the 'Observation:' field, which will be available as input for the next step.
   In the end you have to return a final answer using the `final_answer` tool.
 
+  APART from code blobs you can also ask a user to clarify the question, or to provide more information. To do this write:
+  '{{prompt_user_opening_tag}}' followed by your question, and close it with '{{prompt_user_closing_tag}}'.
+
   Here are a few examples using notional tools:
   ---
+  Task: "Analyze the contract"
+
+  Thought: This question is not precise enough, I will ask the user to clarify.
+  {{prompt_user_opening_tag}}
+  Could you please clarify what specific aspects of the contract you would like me to analyze? For example, are you interested in the terms and conditions, the financial implications, or the legal compliance?
+  {{prompt_user_closing_tag}}
+
+  Observation: "I want insurance analysis, specifically the insurance coverage and the terms of the contract."
+
+  Thought: I will scan the contract for insurance-related terms and conditions.
+
+
   Task: "Generate an image of the oldest person in this document."
 
   Thought: I will proceed step by step and use the following tools: `document_qa` to find the oldest person in the document, then `image_generator` to generate an image according to the answer.

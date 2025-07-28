@@ -60,6 +60,7 @@ from .memory import (
     Timing,
     TokenUsage,
     ToolCall,
+    UserResponseStep,  # <-- add this import
 )
 from .models import (
     CODEAGENT_RESPONSE_FORMAT,
@@ -92,6 +93,7 @@ from .utils import (
     is_valid_name,
     make_init_file,
     parse_code_blobs,
+    parse_prompt_user,
     truncate_content,
 )
 
@@ -116,6 +118,10 @@ def populate_template(template: str, variables: dict[str, Any]) -> str:
 class ActionOutput:
     output: Any
     is_final_answer: bool
+
+@dataclass
+class AskUserOutput:
+    question: str
 
 
 @dataclass
@@ -276,6 +282,7 @@ class MultiStepAgent(ABC):
         final_answer_checks: list[Callable] | None = None,
         return_full_result: bool = False,
         logger: AgentLogger | None = None,
+        memory: dict = None,  # allow dict or AgentMemory
     ):
         self.agent_name = self.__class__.__name__
         self.model = model
@@ -313,7 +320,10 @@ class MultiStepAgent(ABC):
         self._validate_tools_and_managed_agents(tools, managed_agents)
 
         self.task: str | None = None
-        self.memory = AgentMemory(self.system_prompt)
+        if memory is not None:
+            self.memory = AgentMemory.from_dict(memory)
+        else:
+            self.memory = AgentMemory(self.system_prompt)
 
         if logger is None:
             self.logger = AgentLogger(level=verbosity_level)
@@ -440,20 +450,29 @@ class MultiStepAgent(ABC):
             self.task += f"""
 You have been provided with these additional arguments, that you can access directly using the keys as variables:
 {str(additional_args)}."""
+        print(self.memory)
+        if self.memory.steps == []:
+            # Initialize memory with system prompt if not already set
+            self.memory = AgentMemory(system_prompt=self.system_prompt)
+            # self.memory.system_prompt = SystemPromptStep(system_prompt=self.system_prompt)
+        
+            if reset:
+                self.memory.reset()
+                self.monitor.reset()
 
-        self.memory.system_prompt = SystemPromptStep(system_prompt=self.system_prompt)
-        if reset:
-            self.memory.reset()
-            self.monitor.reset()
-
-        self.logger.log_task(
-            content=self.task.strip(),
-            subtitle=f"{type(self.model).__name__} - {(self.model.model_id if hasattr(self.model, 'model_id') else '')}",
-            level=LogLevel.INFO,
-            title=self.name if hasattr(self, "name") else None,
-        )
-        self.memory.steps.append(TaskStep(task=self.task, task_images=images))
-
+            self.logger.log_task(
+                content=self.task.strip(),
+                subtitle=f"{type(self.model).__name__} - {(self.model.model_id if hasattr(self.model, 'model_id') else '')}",
+                level=LogLevel.INFO,
+                title=self.name if hasattr(self, "name") else None,
+            )
+            self.memory.steps.append(TaskStep(task=self.task, task_images=images))
+        else:
+            # Insert a UserResponseStep if memory is loaded from dict (i.e., not a fresh run)
+            self.memory.steps.append(UserResponseStep(user_message=self.task))
+            # ...existing code...
+            last_action_step = self.memory.steps[-1]
+            self.step_number = getattr(last_action_step, "step_number", 0) + 1
         if getattr(self, "python_executor", None):
             self.python_executor.send_variables(variables=self.state)
             self.python_executor.send_tools({**self.tools, **self.managed_agents})
@@ -481,7 +500,7 @@ You have been provided with these additional arguments, that you can access dire
                         total_input_tokens += step.token_usage.input_tokens
                         total_output_tokens += step.token_usage.output_tokens
             if correct_token_usage:
-                token_usage = TokenUsage(input_tokens=total_input_tokens, output_tokens=total_output_tokens)
+                token_usage = TokenUsage(input_tokens=total_input_tokens, outputTokens=total_output_tokens)
             else:
                 token_usage = None
 
@@ -504,10 +523,13 @@ You have been provided with these additional arguments, that you can access dire
 
     def _run_stream(
         self, task: str, max_steps: int, images: list["PIL.Image.Image"] | None = None
-    ) -> Generator[ActionStep | PlanningStep | FinalAnswerStep | ChatMessageStreamDelta]:
-        self.step_number = 1
+    ) -> Generator[ActionStep | PlanningStep | FinalAnswerStep | ChatMessageStreamDelta | AskUserOutput]:
+        print(f"[DEBUG] _run_stream START: task={task}, max_steps={max_steps}")
+        if not self.step_number:
+            self.step_number = 1
         returned_final_answer = False
         while not returned_final_answer and self.step_number <= max_steps:
+            print(f"[DEBUG] _run_stream LOOP: step_number={self.step_number}")
             if self.interrupt_switch:
                 raise AgentError("Agent interrupted.", self.logger)
 
@@ -541,9 +563,18 @@ You have been provided with these additional arguments, that you can access dire
             self.logger.log_rule(f"Step {self.step_number}", level=LogLevel.INFO)
             try:
                 for output in self._step_stream(action_step):
-                    # Yield all
+                    print(f"[DEBUG] _run_stream: yielded from _step_stream: {type(output)} value={output}")
                     yield output
-
+                    # Extra debug: show type and value before AskUserOutput check
+                    print(f"[DEBUG] _run_stream: about to check AskUserOutput, type={type(output)}, value={output}")
+                    if isinstance(output, AskUserOutput):
+                        print(f"[DEBUG] _run_stream: got AskUserOutput, question={output.question}")
+                        self.logger.log(
+                            Text(f"Question to user: {output.question}", style=f"bold {YELLOW_HEX}"),
+                            level=LogLevel.INFO,
+                        )
+                        print(f"[DEBUG] _run_stream: returning after AskUserOutput!")
+                        break
                     if isinstance(output, ActionOutput) and output.is_final_answer:
                         final_answer = output.output
                         self.logger.log(
@@ -571,6 +602,7 @@ You have been provided with these additional arguments, that you can access dire
         if not returned_final_answer and self.step_number == max_steps + 1:
             final_answer = self._handle_max_steps_reached(task, images)
             yield action_step
+        print(f"[DEBUG] _run_stream: yielding FinalAnswerStep and exiting")
         yield FinalAnswerStep(handle_agent_output_types(final_answer))
 
     def _validate_final_answer(self, final_answer: Any):
@@ -1526,7 +1558,7 @@ class CodeAgent(MultiStepAgent):
             if code_block_tags == "markdown"
             else ("<code>", "</code>")
         )
-
+        self.prompt_user_tags = ("<ASK USER>", "</ASK USER>")
         super().__init__(
             tools=tools,
             model=model,
@@ -1550,6 +1582,8 @@ class CodeAgent(MultiStepAgent):
         self.executor_type = executor_type
         self.executor_kwargs: dict[str, Any] = executor_kwargs or {}
         self.python_executor = self.create_python_executor()
+        self.asked_question = False
+        self.questions_to_user = []
 
     def __enter__(self):
         return self
@@ -1594,13 +1628,15 @@ class CodeAgent(MultiStepAgent):
                 "custom_instructions": self.instructions,
                 "code_block_opening_tag": self.code_block_tags[0],
                 "code_block_closing_tag": self.code_block_tags[1],
+                "prompt_user_opening_tag": self.prompt_user_tags[0],
+                "prompt_user_closing_tag": self.prompt_user_tags[1],
             },
         )
         return system_prompt
 
     def _step_stream(
         self, memory_step: ActionStep
-    ) -> Generator[ChatMessageStreamDelta | ToolCall | ToolOutput | ActionOutput]:
+    ) -> Generator[ChatMessageStreamDelta | ToolCall | ToolOutput | ActionOutput | AskUserOutput]:
         """
         Perform one step in the ReAct framework: the agent thinks, acts, and observes the result.
         Yields ChatMessageStreamDelta during the run if streaming is enabled.
@@ -1665,6 +1701,19 @@ class CodeAgent(MultiStepAgent):
 
         ### Parse output ###
         try:
+            question_to_user = parse_prompt_user(output_text, self.prompt_user_tags)
+
+            print(f"[DEBUG] _step_stream: output_text={output_text}")
+            print(f"[DEBUG] _step_stream: question_to_user={question_to_user}")
+
+            if question_to_user:
+                print(f"[DEBUG] _step_stream: returning AskUserOutput({question_to_user})")
+                self.questions_to_user.append(question_to_user)
+                self.asked_question = True
+                yield AskUserOutput(
+                    question=question_to_user
+                )
+                
             if self._use_structured_outputs_internally:
                 code_action = json.loads(output_text)["code"]
                 code_action = extract_code_from_text(code_action, self.code_block_tags) or code_action

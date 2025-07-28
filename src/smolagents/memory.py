@@ -37,6 +37,22 @@ class ToolCall:
             },
         }
 
+    @classmethod
+    def from_dict(cls, d):
+        # Handle both dataclass-style and .dict() style
+        if "function" in d:
+            return cls(
+                name=d["function"]["name"],
+                arguments=d["function"]["arguments"],
+                id=d["id"],
+            )
+        # fallback to dataclass-style
+        return cls(
+            name=d["name"],
+            arguments=d["arguments"],
+            id=d["id"],
+        )
+
 
 @dataclass
 class MemoryStep:
@@ -68,7 +84,7 @@ class ActionStep(MemoryStep):
         return {
             "step_number": self.step_number,
             "timing": self.timing.dict(),
-            "model_input_messages": self.model_input_messages,
+            "model_input_messages": [msg.dict() for msg in self.model_input_messages] if self.model_input_messages else None,
             "tool_calls": [tc.dict() for tc in self.tool_calls] if self.tool_calls else [],
             "error": self.error.dict() if self.error else None,
             "model_output_message": self.model_output_message.dict() if self.model_output_message else None,
@@ -143,6 +159,48 @@ class ActionStep(MemoryStep):
 
         return messages
 
+    @classmethod
+    def from_dict(cls, d):
+        # Properly reconstruct nested fields from dicts
+        def timing_from_dict(timing_dict):
+            if isinstance(timing_dict, dict):
+                # Only keep keys that Timing accepts
+                allowed = {"start_time", "end_time"}
+                filtered = {k: v for k, v in timing_dict.items() if k in allowed}
+                return Timing(**filtered)
+            return timing_dict
+
+        def token_usage_from_dict(token_usage_dict):
+            if isinstance(token_usage_dict, dict):
+                allowed = {"input_tokens", "output_tokens"}
+                filtered = {k: v for k, v in token_usage_dict.items() if k in allowed}
+                return TokenUsage(**filtered)
+            return token_usage_dict
+
+        timing = timing_from_dict(d["timing"])
+        model_input_messages = [ChatMessage.from_dict(msg) if isinstance(msg, dict) else msg for msg in d.get("model_input_messages") or []]
+        # Use ToolCall.from_dict for each tool call
+        tool_calls = [ToolCall.from_dict(tc) if isinstance(tc, dict) else tc for tc in d.get("tool_calls") or []]
+        error = AgentError(**d["error"]) if d.get("error") and isinstance(d["error"], dict) else d.get("error")
+        model_output_message = ChatMessage.from_dict(d["model_output_message"]) if d.get("model_output_message") and isinstance(d["model_output_message"], dict) else d.get("model_output_message")
+        token_usage = token_usage_from_dict(d["token_usage"]) if d.get("token_usage") else d.get("token_usage")
+        # observations_images and action_output are left as-is
+        return cls(
+            step_number=d["step_number"],
+            timing=timing,
+            model_input_messages=model_input_messages if model_input_messages else None,
+            tool_calls=tool_calls if tool_calls else None,
+            error=error,
+            model_output_message=model_output_message,
+            model_output=d.get("model_output"),
+            code_action=d.get("code_action"),
+            observations=d.get("observations"),
+            observations_images=d.get("observations_images"),
+            action_output=d.get("action_output"),
+            token_usage=token_usage,
+            is_final_answer=d.get("is_final_answer", False),
+        )
+
 
 @dataclass
 class PlanningStep(MemoryStep):
@@ -163,6 +221,34 @@ class PlanningStep(MemoryStep):
             # This second message creates a role change to prevent models models from simply continuing the plan message
         ]
 
+    @classmethod
+    def from_dict(cls, d):
+        def timing_from_dict(timing_dict):
+            if isinstance(timing_dict, dict):
+                allowed = {"start_time", "end_time"}
+                filtered = {k: v for k, v in timing_dict.items() if k in allowed}
+                return Timing(**filtered)
+            return timing_dict
+
+        def token_usage_from_dict(token_usage_dict):
+            if isinstance(token_usage_dict, dict):
+                allowed = {"input_tokens", "output_tokens"}
+                filtered = {k: v for k, v in token_usage_dict.items() if k in allowed}
+                return TokenUsage(**filtered)
+            return token_usage_dict
+
+        model_input_messages = [ChatMessage.from_dict(msg) if isinstance(msg, dict) else msg for msg in d["model_input_messages"]]
+        model_output_message = ChatMessage.from_dict(d["model_output_message"]) if isinstance(d["model_output_message"], dict) else d["model_output_message"]
+        timing = timing_from_dict(d["timing"])
+        token_usage = token_usage_from_dict(d["token_usage"]) if d.get("token_usage") else d.get("token_usage")
+        return cls(
+            model_input_messages=model_input_messages,
+            model_output_message=model_output_message,
+            plan=d["plan"],
+            timing=timing,
+            token_usage=token_usage,
+        )
+
 
 @dataclass
 class TaskStep(MemoryStep):
@@ -176,6 +262,13 @@ class TaskStep(MemoryStep):
 
         return [ChatMessage(role=MessageRole.USER, content=content)]
 
+    @classmethod
+    def from_dict(cls, d):
+        return cls(
+            task=d["task"],
+            task_images=d.get("task_images"),
+        )
+
 
 @dataclass
 class SystemPromptStep(MemoryStep):
@@ -186,10 +279,26 @@ class SystemPromptStep(MemoryStep):
             return []
         return [ChatMessage(role=MessageRole.SYSTEM, content=[{"type": "text", "text": self.system_prompt}])]
 
+    @classmethod
+    def from_dict(cls, d):
+        return cls(system_prompt=d["system_prompt"])
+
 
 @dataclass
 class FinalAnswerStep(MemoryStep):
     output: Any
+
+
+@dataclass
+class UserResponseStep(MemoryStep):
+    user_message: str
+
+    def to_messages(self, summary_mode: bool = False) -> list[ChatMessage]:
+        return [ChatMessage(role=MessageRole.USER, content=[{"type": "text", "text": self.user_message}])]
+
+    @classmethod
+    def from_dict(cls, d):
+        return cls(user_message=d["user_message"])
 
 
 class AgentMemory:
@@ -256,6 +365,29 @@ class AgentMemory:
         return "\n\n".join(
             [step.code_action for step in self.steps if isinstance(step, ActionStep) and step.code_action is not None]
         )
+    
+    def dump_to_dict(self) -> dict:
+        """Returns a dictionary representation of the agent's memory, including system prompt and steps."""
+        return {
+            "system_prompt": self.system_prompt.dict(),
+            "steps": [{"step_type": step.__class__.__name__, "step_data": step.dict()} for step in self.steps],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict):
+        obj = cls(system_prompt=data["system_prompt"]["system_prompt"])
+        obj.system_prompt = SystemPromptStep.from_dict(data["system_prompt"])
+        step_classes = {
+            "ActionStep": ActionStep,
+            "PlanningStep": PlanningStep,
+            "TaskStep": TaskStep,
+            "UserResponseStep": UserResponseStep,
+        }
+        obj.steps = [
+            step_classes[step["step_type"]].from_dict(step["step_data"])
+            for step in data["steps"]
+        ]
+        return obj
 
 
 class CallbackRegistry:
