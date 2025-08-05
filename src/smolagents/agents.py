@@ -261,6 +261,7 @@ class MultiStepAgent(ABC):
             Each function should:
             - Take the final answer and the agent's memory as arguments.
             - Return a boolean indicating whether the final answer is valid.
+        context (`str`, *optional*): Additional context to be included in the system prompt.
     """
 
     def __init__(
@@ -283,6 +284,7 @@ class MultiStepAgent(ABC):
         return_full_result: bool = False,
         logger: AgentLogger | None = None,
         memory: dict = None,  # allow dict or AgentMemory
+        context: str | None = None,
     ):
         self.agent_name = self.__class__.__name__
         self.model = model
@@ -315,6 +317,7 @@ class MultiStepAgent(ABC):
         self.final_answer_checks = final_answer_checks if final_answer_checks is not None else []
         self.return_full_result = return_full_result
         self.instructions = instructions
+        self.context = context
         self._setup_managed_agents(managed_agents)
         self._setup_tools(tools, add_base_tools)
         self._validate_tools_and_managed_agents(tools, managed_agents)
@@ -336,7 +339,10 @@ class MultiStepAgent(ABC):
 
     @property
     def system_prompt(self) -> str:
-        return self.initialize_system_prompt()
+        base_prompt = self.initialize_system_prompt()
+        if self.context:
+            return f"{base_prompt}\n\nAdditional context:\n{self.context}"
+        return base_prompt
 
     @system_prompt.setter
     def system_prompt(self, value: str):
