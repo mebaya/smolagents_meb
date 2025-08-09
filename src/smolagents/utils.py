@@ -189,6 +189,14 @@ def parse_prompt_user(text: str, prompt_user_tags: tuple[str, str]) -> str:
         return "\n\n".join(match.strip() for match in matches)
     return None
 
+def parse_final_answer(text: str, final_answer_tags: tuple[str, str]) -> str:
+    """Extract final answer from the LLM's output."""
+    pattern = rf"{final_answer_tags[0]}(.*?){final_answer_tags[1]}"
+    matches = re.findall(pattern, text, re.DOTALL)
+    if matches:
+        return "\n\n".join(match.strip() for match in matches)
+    return None
+
 def parse_code_blobs(text: str, code_block_tags: tuple[str, str]) -> str:
     """Extract code blocs from the LLM's output.
 

@@ -93,6 +93,7 @@ from .utils import (
     is_valid_name,
     make_init_file,
     parse_code_blobs,
+    parse_final_answer,
     parse_prompt_user,
     truncate_content,
 )
@@ -1565,6 +1566,7 @@ class CodeAgent(MultiStepAgent):
             else ("<code>", "</code>")
         )
         self.prompt_user_tags = ("<ASK USER>", "</ASK USER>")
+        self.final_answer_tags = ("<FINAL ANSWER>", "</FINAL ANSWER>")
         super().__init__(
             tools=tools,
             model=model,
@@ -1636,6 +1638,8 @@ class CodeAgent(MultiStepAgent):
                 "code_block_closing_tag": self.code_block_tags[1],
                 "prompt_user_opening_tag": self.prompt_user_tags[0],
                 "prompt_user_closing_tag": self.prompt_user_tags[1],
+                "final_answer_opening_tag": self.final_answer_tags[0],
+                "final_answer_closing_tag": self.final_answer_tags[1],
             },
         )
         return system_prompt
@@ -1719,6 +1723,15 @@ class CodeAgent(MultiStepAgent):
                 yield AskUserOutput(
                     question=question_to_user
                 )
+                
+            # Check for final answer tags
+            final_answer_parsed = parse_final_answer(output_text, self.final_answer_tags)
+            print(f"[DEBUG] _step_stream: final_answer_parsed={final_answer_parsed}")
+            
+            if final_answer_parsed:
+                print(f"[DEBUG] _step_stream: returning ActionOutput with final answer")
+                yield ActionOutput(output=final_answer_parsed, is_final_answer=True)
+                return
                 
             if self._use_structured_outputs_internally:
                 code_action = json.loads(output_text)["code"]
